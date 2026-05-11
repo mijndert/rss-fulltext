@@ -1,0 +1,16 @@
+default_interval: 1h
+
+feeds:
+  - name: techcrunch
+    url: https://techcrunch.com/feed/
+    title: TechCrunch (full text)
+    interval: 30m
+
+  - name: bbc-news
+    url: https://feeds.bbci.co.uk/news/rss.xml
+    title: BBC News (full text)
+    interval: 15m
+
+  - name: hn
+    url: https://hnrss.org/frontpage
+    title: Hacker News (full text)
