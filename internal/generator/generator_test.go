@@ -2,6 +2,7 @@ package generator
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/microcosm-cc/bluemonday"
 
 	"rss-fulltext/internal/config"
 )
@@ -101,15 +104,21 @@ func TestTrackerConcurrentAccess(t *testing.T) {
 }
 
 type fakeExtractor struct {
-	content string
-	err     error
+	content   string
+	err       error
+	sanitizer *bluemonday.Policy
 }
 
 func (f *fakeExtractor) Extract(_ context.Context, _ string) (string, error) {
 	return f.content, f.err
 }
 
-func (f *fakeExtractor) Sanitize(s string) string { return s }
+func (f *fakeExtractor) Sanitize(s string) string {
+	if f.sanitizer == nil {
+		return s
+	}
+	return strings.TrimSpace(f.sanitizer.Sanitize(s))
+}
 
 const sampleRSS = `<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -163,7 +172,7 @@ func TestRefreshWritesFeed(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	w := newWorker(t, srv.URL, dir, &fakeExtractor{content: "<p>extracted</p>"})
+	w := newWorker(t, srv.URL, dir, &fakeExtractor{content: "extracted-body-marker"})
 	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
 
 	if err := w.Refresh(context.Background()); err != nil {
@@ -175,7 +184,83 @@ func TestRefreshWritesFeed(t *testing.T) {
 		t.Fatalf("read output: %v", err)
 	}
 	if !strings.Contains(string(body), "Item One") {
-		t.Errorf("output missing item: %s", body)
+		t.Errorf("output missing item title: %s", body)
+	}
+	if !strings.Contains(string(body), "extracted-body-marker") {
+		t.Errorf("output missing extracted content (Extract must reach the rendered XML): %s", body)
+	}
+}
+
+const maliciousRSS = `<?xml version="1.0"?>
+<rss version="2.0"><channel>
+<title>Malicious</title>
+<link>https://example.test/</link>
+<description>desc</description>
+<item>
+<title>Item</title>
+<link>https://example.test/one</link>
+<description><![CDATA[<p>hello</p><script>alert('xss-from-description')</script>]]></description>
+</item>
+</channel></rss>`
+
+func TestRefreshSanitizesUpstreamDescription(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, maliciousRSS)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ext := &fakeExtractor{
+		content:   "safe-extracted",
+		sanitizer: bluemonday.UGCPolicy(),
+	}
+	w := newWorker(t, srv.URL, dir, ext)
+	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
+
+	if err := w.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(dir, "sample.xml"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	got := string(body)
+	if strings.Contains(got, "<script>") || strings.Contains(got, "xss-from-description") {
+		t.Errorf("malicious script not stripped from output: %s", got)
+	}
+}
+
+func TestRefreshExtractFailureFallsBackToSanitizedDescription(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, maliciousRSS)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ext := &fakeExtractor{
+		err:       errors.New("extract boom"),
+		sanitizer: bluemonday.UGCPolicy(),
+	}
+	w := newWorker(t, srv.URL, dir, ext)
+	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
+
+	if err := w.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	body, err := os.ReadFile(filepath.Join(dir, "sample.xml"))
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	got := string(body)
+	if !strings.Contains(got, "hello") {
+		t.Errorf("expected sanitized description as fallback content, got: %s", got)
+	}
+	if strings.Contains(got, "<script>") || strings.Contains(got, "xss-from-description") {
+		t.Errorf("extract-failure fallback path leaked unsanitized HTML: %s", got)
 	}
 }
 

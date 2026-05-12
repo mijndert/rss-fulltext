@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"testing"
+	"time"
 )
 
 func TestIsPublicIP(t *testing.T) {
@@ -81,5 +83,53 @@ func TestNewClientDefaults(t *testing.T) {
 	}
 	if c.Transport == nil {
 		t.Error("Transport should be set")
+	}
+}
+
+func mustRequest(t *testing.T, target string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
+}
+
+func TestCheckRedirectBlocksPrivateHost(t *testing.T) {
+	c := NewClient(time.Second, Options{})
+	err := c.CheckRedirect(mustRequest(t, "http://127.0.0.1/private"), nil)
+	if !errors.Is(err, ErrBlockedAddress) {
+		t.Errorf("expected ErrBlockedAddress, got %v", err)
+	}
+}
+
+func TestCheckRedirectBlocksBadScheme(t *testing.T) {
+	c := NewClient(time.Second, Options{})
+	err := c.CheckRedirect(mustRequest(t, "file:///etc/passwd"), nil)
+	if !errors.Is(err, ErrBlockedScheme) {
+		t.Errorf("expected ErrBlockedScheme, got %v", err)
+	}
+}
+
+func TestCheckRedirectAllowsPublicHost(t *testing.T) {
+	c := NewClient(time.Second, Options{})
+	if err := c.CheckRedirect(mustRequest(t, "https://8.8.8.8/foo"), nil); err != nil {
+		t.Errorf("public host should pass, got %v", err)
+	}
+}
+
+func TestCheckRedirectEnforcesMaxRedirects(t *testing.T) {
+	c := NewClient(time.Second, Options{MaxRedirects: 3})
+	via := make([]*http.Request, 3)
+	err := c.CheckRedirect(mustRequest(t, "https://example.com/"), via)
+	if !errors.Is(err, ErrTooManyRedirects) {
+		t.Errorf("expected ErrTooManyRedirects, got %v", err)
+	}
+}
+
+func TestCheckRedirectAllowsPrivateWhenOptIn(t *testing.T) {
+	c := NewClient(time.Second, Options{AllowPrivateAddresses: true})
+	if err := c.CheckRedirect(mustRequest(t, "http://127.0.0.1/private"), nil); err != nil {
+		t.Errorf("with AllowPrivateAddresses=true, loopback should pass, got %v", err)
 	}
 }

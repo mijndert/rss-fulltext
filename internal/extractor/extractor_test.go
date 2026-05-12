@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -71,6 +72,7 @@ const articleHTML = `<!doctype html>
 <p>This is the first paragraph of a substantial article that should be picked up by readability. It contains enough textual content to clear any density thresholds the algorithm applies.</p>
 <p>This is the second paragraph, also with plenty of words so the heuristic considers this the main body of the page. We add more sentences. And more sentences. And still more sentences so it is unambiguous.</p>
 <p>A third paragraph rounds it out with additional prose so the extractor has no doubt about which element holds the article content.</p>
+<script>alert('xss-from-article')</script>
 </article>
 </body></html>`
 
@@ -88,6 +90,9 @@ func TestExtractHappyPath(t *testing.T) {
 	}
 	if got == "" {
 		t.Fatal("expected non-empty content")
+	}
+	if strings.Contains(got, "<script>") || strings.Contains(got, "xss-from-article") {
+		t.Errorf("expected script to be stripped from extracted content, got %q", got)
 	}
 }
 
@@ -131,9 +136,9 @@ func TestExtractRejectsInvalidURL(t *testing.T) {
 }
 
 func TestExtractUsesCache(t *testing.T) {
-	var hits int
+	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hits++
+		hits.Add(1)
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = io.WriteString(w, articleHTML)
 	}))
@@ -148,7 +153,7 @@ func TestExtractUsesCache(t *testing.T) {
 	if _, err := e.Extract(context.Background(), srv.URL+"/a"); err != nil {
 		t.Fatalf("second Extract: %v", err)
 	}
-	if hits != 1 {
-		t.Errorf("expected 1 upstream hit (second call served from cache), got %d", hits)
+	if got := hits.Load(); got != 1 {
+		t.Errorf("expected 1 upstream hit (second call served from cache), got %d", got)
 	}
 }
