@@ -1,4 +1,4 @@
-module rss-feedgen
+module rss-fulltext
 
 go 1.23
 

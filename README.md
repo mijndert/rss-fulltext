@@ -1,4 +1,4 @@
-# rss-feedgen
+# rss-fulltext
 
 Takes summary-only RSS feeds, fetches every linked article, extracts the body
 with readability, and writes the enriched feed to disk as `<name>.xml`. Files
@@ -7,8 +7,8 @@ are regenerated on a per-feed schedule and served as static XML over HTTP.
 ## Quick start
 
 ```sh
-git clone https://github.com/mijndert/rss-feedgen.git
-cd rss-feedgen
+git clone https://github.com/mijndert/rss-fulltext.git
+cd rss-fulltext
 docker compose up -d
 ```
 
@@ -53,9 +53,9 @@ All have defaults in `docker-compose.yml`. Override there or with `.env`.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `LISTEN_ADDR` | `:8080` in compose, `127.0.0.1:8080` for the bare binary | the bare-binary default binds loopback only |
-| `CONFIG_PATH` | `/etc/rss-feedgen/feeds.yaml` | mounted from `./feeds.yaml` |
-| `OUTPUT_DIR` | `/var/lib/rss-feedgen/feeds` | where `<name>.xml` files land |
-| `CACHE_DIR` | `/var/lib/rss-feedgen/cache` | per-article cache; sha256 keys |
+| `CONFIG_PATH` | `/etc/rss-fulltext/feeds.yaml` | mounted from `./feeds.yaml` |
+| `OUTPUT_DIR` | `/var/lib/rss-fulltext/feeds` | where `<name>.xml` files land |
+| `CACHE_DIR` | `/var/lib/rss-fulltext/cache` | per-article cache; sha256 keys |
 | `CACHE_TTL` | `24h` | how long a fetched article body stays cached; `0` disables caching |
 | `JANITOR_INTERVAL` | `1h` | how often expired cache files are purged; `0` disables the janitor |
 | `CONCURRENCY` | `4` | parallel article fetches per refresh |
@@ -66,17 +66,17 @@ All have defaults in `docker-compose.yml`. Override there or with `.env`.
 | `MAX_ARTICLE_BYTES` | `5242880` | hard cap on body read by readability |
 | `MAX_FEED_BYTES` | `4194304` | hard cap on the source-feed XML |
 | `MAX_ITEMS_PER_FEED` | `50` | truncate longer feeds |
-| `USER_AGENT` | `rss-feedgen/2.0` | sent on every outbound fetch |
+| `USER_AGENT` | `rss-fulltext/2.0` | sent on every outbound fetch |
 | `ALLOW_PRIVATE_ADDRESSES` | `false` | set `true` only for local testing — disables the SSRF guard |
 
 ## Persistence
 
-Compose creates a named volume `data` mounted at `/var/lib/rss-feedgen`. It
+Compose creates a named volume `data` mounted at `/var/lib/rss-fulltext`. It
 holds the generated `.xml` files and the article cache. Inspect with:
 
 ```sh
-docker compose exec rss-feedgen ls /var/lib/rss-feedgen/feeds
-docker volume inspect rss-feedgen_data
+docker compose exec rss-fulltext ls /var/lib/rss-fulltext/feeds
+docker volume inspect rss-fulltext_data
 ```
 
 Removing the volume (`docker compose down -v`) wipes both the cache and the
@@ -84,10 +84,10 @@ generated feeds. The feeds will be regenerated on next start.
 
 ## Pinning a version
 
-`docker-compose.yml` uses `ghcr.io/mijndert/rss-feedgen:latest`. To pin:
+`docker-compose.yml` uses `ghcr.io/mijndert/rss-fulltext:latest`. To pin:
 
 ```yaml
-image: ghcr.io/mijndert/rss-feedgen:1.2.3
+image: ghcr.io/mijndert/rss-fulltext:1.2.3
 ```
 
 Tagged versions are published by the `docker` workflow when a `vX.Y.Z` git tag
@@ -96,13 +96,13 @@ is pushed.
 ## Building locally
 
 ```sh
-docker build -t rss-feedgen:dev .
-# then edit docker-compose.yml to use rss-feedgen:dev
+docker build -t rss-fulltext:dev .
+# then edit docker-compose.yml to use rss-fulltext:dev
 ```
 
 Or run the binary directly:
 
 ```sh
-go build -o rss-feedgen ./
-CONFIG_PATH=./feeds.yaml OUTPUT_DIR=./out CACHE_DIR=./cache ./rss-feedgen
+go build -o rss-fulltext ./
+CONFIG_PATH=./feeds.yaml OUTPUT_DIR=./out CACHE_DIR=./cache ./rss-fulltext
 ```

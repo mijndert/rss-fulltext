@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"rss-feedgen/internal/generator"
+	"rss-fulltext/internal/generator"
 )
 
 type Config struct {

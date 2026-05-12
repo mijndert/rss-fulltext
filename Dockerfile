@@ -13,7 +13,7 @@ RUN go mod download
 COPY main.go ./
 COPY internal ./internal
 
-RUN go build -ldflags="-s -w" -o /out/rss-feedgen ./
+RUN go build -ldflags="-s -w" -o /out/rss-fulltext ./
 
 # Stage the writable data directories with the right ownership so the
 # named volume picks them up on first run.
@@ -21,10 +21,10 @@ RUN mkdir -p /out/data/feeds /out/data/cache && \
     chown -R 65532:65532 /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/rss-feedgen /usr/local/bin/rss-feedgen
-COPY --from=build --chown=nonroot:nonroot /out/data /var/lib/rss-feedgen
+COPY --from=build /out/rss-fulltext /usr/local/bin/rss-fulltext
+COPY --from=build --chown=nonroot:nonroot /out/data /var/lib/rss-fulltext
 
 EXPOSE 8080
 USER nonroot:nonroot
-VOLUME ["/var/lib/rss-feedgen"]
-ENTRYPOINT ["/usr/local/bin/rss-feedgen"]
+VOLUME ["/var/lib/rss-fulltext"]
+ENTRYPOINT ["/usr/local/bin/rss-fulltext"]

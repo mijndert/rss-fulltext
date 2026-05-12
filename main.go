@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"rss-feedgen/internal/config"
-	"rss-feedgen/internal/extractor"
-	"rss-feedgen/internal/filecache"
-	"rss-feedgen/internal/generator"
-	"rss-feedgen/internal/safehttp"
-	"rss-feedgen/internal/server"
+	"rss-fulltext/internal/config"
+	"rss-fulltext/internal/extractor"
+	"rss-fulltext/internal/filecache"
+	"rss-fulltext/internal/generator"
+	"rss-fulltext/internal/safehttp"
+	"rss-fulltext/internal/server"
 )
 
 func main() {
@@ -206,8 +206,8 @@ func loadConfig(logger *slog.Logger) (appConfig, error) {
 	c := appConfig{
 		ListenAddr:            env("LISTEN_ADDR", "127.0.0.1:8080"),
 		ConfigPath:            env("CONFIG_PATH", ""),
-		OutputDir:             env("OUTPUT_DIR", "/var/lib/rss-feedgen/feeds"),
-		CacheDir:              env("CACHE_DIR", "/var/lib/rss-feedgen/cache"),
+		OutputDir:             env("OUTPUT_DIR", "/var/lib/rss-fulltext/feeds"),
+		CacheDir:              env("CACHE_DIR", "/var/lib/rss-fulltext/cache"),
 		CacheTTL:              envDuration("CACHE_TTL", 24*time.Hour, logger),
 		JanitorInterval:       envDuration("JANITOR_INTERVAL", time.Hour, logger),
 		Concurrency:           envInt("CONCURRENCY", 4, logger),
@@ -218,7 +218,7 @@ func loadConfig(logger *slog.Logger) (appConfig, error) {
 		MaxArticleBytes:       envInt64("MAX_ARTICLE_BYTES", 5*1024*1024, logger),
 		MaxFeedBytes:          envInt64("MAX_FEED_BYTES", 4*1024*1024, logger),
 		MaxItemsPerFeed:       envInt("MAX_ITEMS_PER_FEED", 50, logger),
-		UserAgent:             env("USER_AGENT", "rss-feedgen/2.0"),
+		UserAgent:             env("USER_AGENT", "rss-fulltext/2.0"),
 		AllowPrivateAddresses: envBool("ALLOW_PRIVATE_ADDRESSES", false, logger),
 	}
 	return c, c.validate()
