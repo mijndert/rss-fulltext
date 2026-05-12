@@ -1,0 +1,154 @@
+package extractor
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type memCache struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func newMemCache() *memCache { return &memCache{m: make(map[string]string)} }
+
+func (c *memCache) Get(k string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.m[k]
+	return v, ok
+}
+
+func (c *memCache) Set(k, v string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[k] = v
+}
+
+func newExtractor(t *testing.T, cache Cache) *Extractor {
+	t.Helper()
+	return New(Config{
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+		UserAgent:  "test/1.0",
+		MaxBytes:   1 << 20,
+		Cache:      cache,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+}
+
+func TestSanitizeStripsScripts(t *testing.T) {
+	e := newExtractor(t, nil)
+	got := e.Sanitize(`<p>Hello</p><script>alert(1)</script>`)
+	if strings.Contains(got, "<script>") || strings.Contains(got, "alert") {
+		t.Errorf("expected script to be stripped, got %q", got)
+	}
+	if !strings.Contains(got, "<p>Hello</p>") {
+		t.Errorf("expected benign HTML to remain, got %q", got)
+	}
+}
+
+func TestSanitizeTrimsWhitespace(t *testing.T) {
+	e := newExtractor(t, nil)
+	got := e.Sanitize("   hello   ")
+	if got != "hello" {
+		t.Errorf("got %q, want %q", got, "hello")
+	}
+}
+
+const articleHTML = `<!doctype html>
+<html><head><title>Test</title></head>
+<body>
+<article>
+<h1>Hello World</h1>
+<p>This is the first paragraph of a substantial article that should be picked up by readability. It contains enough textual content to clear any density thresholds the algorithm applies.</p>
+<p>This is the second paragraph, also with plenty of words so the heuristic considers this the main body of the page. We add more sentences. And more sentences. And still more sentences so it is unambiguous.</p>
+<p>A third paragraph rounds it out with additional prose so the extractor has no doubt about which element holds the article content.</p>
+</article>
+</body></html>`
+
+func TestExtractHappyPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, articleHTML)
+	}))
+	defer srv.Close()
+
+	e := newExtractor(t, nil)
+	got, err := e.Extract(context.Background(), srv.URL+"/article")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if got == "" {
+		t.Fatal("expected non-empty content")
+	}
+}
+
+func TestExtractRejectsNonHTML(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"hello":"world"}`)
+	}))
+	defer srv.Close()
+
+	e := newExtractor(t, nil)
+	_, err := e.Extract(context.Background(), srv.URL+"/data")
+	if !errors.Is(err, ErrUnsupportedContent) {
+		t.Errorf("expected ErrUnsupportedContent, got %v", err)
+	}
+}
+
+func TestExtractRejectsNon2xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	e := newExtractor(t, nil)
+	_, err := e.Extract(context.Background(), srv.URL+"/x")
+	if !errors.Is(err, ErrUpstreamStatus) {
+		t.Errorf("expected ErrUpstreamStatus, got %v", err)
+	}
+}
+
+func TestExtractRejectsInvalidURL(t *testing.T) {
+	e := newExtractor(t, nil)
+	_, err := e.Extract(context.Background(), "not-a-url")
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Errorf("expected ErrInvalidURL, got %v", err)
+	}
+	_, err = e.Extract(context.Background(), "ftp://example.com/x")
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Errorf("expected ErrInvalidURL for non-http scheme, got %v", err)
+	}
+}
+
+func TestExtractUsesCache(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, articleHTML)
+	}))
+	defer srv.Close()
+
+	cache := newMemCache()
+	e := newExtractor(t, cache)
+
+	if _, err := e.Extract(context.Background(), srv.URL+"/a"); err != nil {
+		t.Fatalf("first Extract: %v", err)
+	}
+	if _, err := e.Extract(context.Background(), srv.URL+"/a"); err != nil {
+		t.Fatalf("second Extract: %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("expected 1 upstream hit (second call served from cache), got %d", hits)
+	}
+}
