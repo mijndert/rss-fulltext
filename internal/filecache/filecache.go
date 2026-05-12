@@ -13,10 +13,13 @@ import (
 	"time"
 )
 
+const defaultMaxEntryBytes = 16 << 20
+
 type FileCache struct {
-	dir    string
-	ttl    time.Duration
-	logger *slog.Logger
+	dir      string
+	ttl      time.Duration
+	maxBytes int64
+	logger   *slog.Logger
 }
 
 func New(dir string, ttl time.Duration, logger *slog.Logger) (*FileCache, error) {
@@ -29,7 +32,7 @@ func New(dir string, ttl time.Duration, logger *slog.Logger) (*FileCache, error)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("filecache mkdir: %w", err)
 	}
-	return &FileCache{dir: dir, ttl: ttl, logger: logger}, nil
+	return &FileCache{dir: dir, ttl: ttl, maxBytes: defaultMaxEntryBytes, logger: logger}, nil
 }
 
 func (c *FileCache) path(key string) string {
@@ -38,20 +41,34 @@ func (c *FileCache) path(key string) string {
 }
 
 func (c *FileCache) Get(key string) (string, bool) {
+	if c.ttl <= 0 {
+		return "", false
+	}
 	p := c.path(key)
 	info, err := os.Stat(p)
 	if err != nil {
 		return "", false
 	}
-	if c.ttl > 0 && time.Since(info.ModTime()) > c.ttl {
+	if time.Since(info.ModTime()) > c.ttl {
 		_ = os.Remove(p)
 		return "", false
 	}
-	b, err := os.ReadFile(p)
+	if c.maxBytes > 0 && info.Size() > c.maxBytes {
+		c.logger.Warn("filecache entry exceeds size cap", "size", info.Size(), "max", c.maxBytes)
+		_ = os.Remove(p)
+		return "", false
+	}
+	f, err := os.Open(p)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Warn("filecache read", "err", err)
+			c.logger.Warn("filecache open", "err", err)
 		}
+		return "", false
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, c.maxBytes))
+	if err != nil {
+		c.logger.Warn("filecache read", "err", err)
 		return "", false
 	}
 	return string(b), true

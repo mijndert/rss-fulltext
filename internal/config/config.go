@@ -24,6 +24,8 @@ type File struct {
 const (
 	MaxConfigBytes = 1 << 20
 	MinInterval    = time.Minute
+	MaxURLLength   = 2048
+	MaxTitleLength = 200
 )
 
 func Load(path string) (*File, error) {
@@ -72,9 +74,15 @@ func (f *File) normalize() error {
 			return fmt.Errorf("feed[%d]: duplicate name %q", i, feed.Name)
 		}
 		seen[feed.Name] = true
+		if len(feed.URL) > MaxURLLength {
+			return fmt.Errorf("feed %q: url is too long (%d > %d)", feed.Name, len(feed.URL), MaxURLLength)
+		}
 		u, err := url.Parse(feed.URL)
 		if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("feed %q: url must be absolute http(s)", feed.Name)
+		}
+		if len(feed.Title) > MaxTitleLength {
+			return fmt.Errorf("feed %q: title is too long (%d > %d)", feed.Name, len(feed.Title), MaxTitleLength)
 		}
 		if feed.Interval == 0 {
 			feed.Interval = f.DefaultInterval

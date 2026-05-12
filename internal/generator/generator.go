@@ -23,6 +23,7 @@ import (
 
 type Extractor interface {
 	Extract(ctx context.Context, articleURL string) (string, error)
+	Sanitize(s string) string
 }
 
 type Status struct {
@@ -157,6 +158,16 @@ func (w *Worker) Refresh(parent context.Context) error {
 	out := w.buildFeed(parsed)
 	w.enrich(ctx, parsed, out)
 
+	if len(out.Items) == 0 {
+		_, statErr := os.Stat(w.OutputFile())
+		if statErr == nil {
+			w.cfg.Logger.Warn("upstream returned 0 items; keeping previous output",
+				"feed", w.cfg.Feed.Name)
+			w.recordError(start, errors.New("upstream returned 0 items"))
+			return nil
+		}
+	}
+
 	if err := w.writeAtomic(out); err != nil {
 		w.recordError(start, fmt.Errorf("write: %w", err))
 		return err
@@ -263,10 +274,11 @@ func (w *Worker) itemFor(ctx context.Context, in *gofeed.Item) *feeds.Item {
 	if in == nil || strings.TrimSpace(in.Link) == "" {
 		return nil
 	}
+	safeDescription := w.cfg.Extractor.Sanitize(in.Description)
 	item := &feeds.Item{
 		Title:       firstNonEmpty(in.Title, in.Link),
 		Link:        &feeds.Link{Href: in.Link},
-		Description: in.Description,
+		Description: safeDescription,
 		Created:     orZero(in.PublishedParsed),
 		Updated:     orZero(in.UpdatedParsed),
 		Id:          firstNonEmpty(in.GUID, in.Link),
@@ -281,7 +293,7 @@ func (w *Worker) itemFor(ctx context.Context, in *gofeed.Item) *feeds.Item {
 			w.cfg.Logger.Warn("extract failed",
 				"feed", w.cfg.Feed.Name, "url", in.Link, "err", err)
 		}
-		item.Content = in.Description
+		item.Content = safeDescription
 		return item
 	}
 	item.Content = content

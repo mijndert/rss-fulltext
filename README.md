@@ -52,14 +52,16 @@ All have defaults in `docker-compose.yml`. Override there or with `.env`.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `LISTEN_ADDR` | `:8080` | inside the container |
+| `LISTEN_ADDR` | `:8080` in compose, `127.0.0.1:8080` for the bare binary | the bare-binary default binds loopback only |
 | `CONFIG_PATH` | `/etc/rss-feedgen/feeds.yaml` | mounted from `./feeds.yaml` |
 | `OUTPUT_DIR` | `/var/lib/rss-feedgen/feeds` | where `<name>.xml` files land |
 | `CACHE_DIR` | `/var/lib/rss-feedgen/cache` | per-article cache; sha256 keys |
-| `CACHE_TTL` | `24h` | how long a fetched article body stays cached |
-| `JANITOR_INTERVAL` | `1h` | how often expired cache files are purged |
+| `CACHE_TTL` | `24h` | how long a fetched article body stays cached; `0` disables caching |
+| `JANITOR_INTERVAL` | `1h` | how often expired cache files are purged; `0` disables the janitor |
 | `CONCURRENCY` | `4` | parallel article fetches per refresh |
 | `REQUEST_TIMEOUT` | `20s` | per-outbound-HTTP-request |
+| `READ_TIMEOUT` | `30s` | full request-read deadline on the HTTP server |
+| `WRITE_TIMEOUT` | `30s` | response-write deadline on the HTTP server |
 | `FEED_TIMEOUT` | `5m` | whole-refresh budget per feed |
 | `MAX_ARTICLE_BYTES` | `5242880` | hard cap on body read by readability |
 | `MAX_FEED_BYTES` | `4194304` | hard cap on the source-feed XML |

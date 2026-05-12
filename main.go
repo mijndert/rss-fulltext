@@ -85,10 +85,14 @@ func main() {
 		Logger:    logger,
 	})
 
+	readHeaderTimeout := 10 * time.Second
+	if cfg.ReadTimeout > 0 && cfg.ReadTimeout < readHeaderTimeout {
+		readHeaderTimeout = cfg.ReadTimeout
+	}
 	httpSrv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           srv.Routes(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
 		IdleTimeout:       60 * time.Second,
@@ -154,25 +158,29 @@ func main() {
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
+	exitCode := 0
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server terminated", "err", err)
-			stop()
-			wg.Wait()
-			os.Exit(1)
+			exitCode = 1
 		}
 	}
+
+	stop()
+	wg.Wait()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "err", err)
 	}
-	stop()
-	wg.Wait()
+
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 type appConfig struct {

@@ -68,6 +68,10 @@ func New(cfg Config) *Extractor {
 	}
 }
 
+func (e *Extractor) Sanitize(s string) string {
+	return strings.TrimSpace(e.sanitizer.Sanitize(s))
+}
+
 func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, error) {
 	if e.cache != nil {
 		if v, ok := e.cache.Get(articleURL); ok {
