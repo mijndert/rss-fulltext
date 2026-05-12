@@ -1,8 +1,21 @@
 # rss-fulltext
 
-Takes summary-only RSS feeds, fetches every linked article, extracts the body
-with readability, and writes the enriched feed to disk as `<name>.xml`. Files
-are regenerated on a per-feed schedule and served as static XML over HTTP.
+Most RSS feeds only ship a headline and a one-paragraph teaser — to actually
+read the piece you have to click out to the publisher's site, which usually
+means a browser, an ad-loaded layout, and an internet connection.
+
+`rss-fulltext` rewrites those feeds so the full article body travels with the
+feed itself. For each entry it fetches the linked page, pulls the main content
+out with readability, sanitises it, and writes the enriched feed to disk as
+`<name>.xml`. Files are regenerated on a per-feed schedule and served as
+static XML over HTTP.
+
+Useful when you want to:
+
+- **Read offline.** Articles ship with the feed.
+- **Read on an e-reader.** Full text instead of a link to a page your e-reader can't render.
+- **Escape publisher chrome.** No popovers, ads, or newsletter modals.
+- **Archive what you read.** Each refresh writes a plain XML file to disk.
 
 ## Quick start
 
