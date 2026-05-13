@@ -3,7 +3,7 @@ module rss-fulltext
 go 1.25.0
 
 require (
-	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
+	codeberg.org/readeck/go-readability/v2 v2.1.1
 	github.com/gorilla/feeds v1.2.0
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/mmcdole/gofeed v1.3.0
@@ -23,7 +23,6 @@ require (
 	github.com/mmcdole/goxpp v1.1.1-0.20240225020742-a0c311522b23 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
-	github.com/stretchr/testify v1.10.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/net v0.41.0 // indirect
+	golang.org/x/text v0.26.0 // indirect
 )

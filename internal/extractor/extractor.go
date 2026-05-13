@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/go-shiori/go-readability"
+	readability "codeberg.org/readeck/go-readability/v2"
 	"github.com/microcosm-cc/bluemonday"
 )
 
@@ -122,13 +122,16 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("readability: %w", err)
 	}
-
-	content := strings.TrimSpace(article.Content)
-	if content == "" {
+	if article.Node == nil {
 		return "", ErrEmptyContent
 	}
 
-	content = strings.TrimSpace(e.sanitizer.Sanitize(content))
+	var rendered strings.Builder
+	if err := article.RenderHTML(&rendered); err != nil {
+		return "", fmt.Errorf("readability render: %w", err)
+	}
+
+	content := strings.TrimSpace(e.sanitizer.Sanitize(rendered.String()))
 	if content == "" {
 		return "", ErrEmptyContent
 	}
