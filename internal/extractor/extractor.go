@@ -125,6 +125,7 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 	if article.Node == nil {
 		return "", ErrEmptyContent
 	}
+	simplifyDOM(article.Node)
 
 	var rendered strings.Builder
 	if err := article.RenderHTML(&rendered); err != nil {
