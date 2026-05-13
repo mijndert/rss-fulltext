@@ -56,7 +56,7 @@ func New(cfg Config) *Extractor {
 		cfg.MaxBytes = 5 * 1024 * 1024
 	}
 	if cfg.Sanitizer == nil {
-		cfg.Sanitizer = bluemonday.UGCPolicy()
+		cfg.Sanitizer = defaultPolicy()
 	}
 	return &Extractor{
 		client:    cfg.HTTPClient,
