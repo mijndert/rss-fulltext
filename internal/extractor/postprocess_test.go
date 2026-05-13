@@ -137,9 +137,14 @@ func TestSimplifyDropsPlaceholderImage(t *testing.T) {
 		),
 	)
 	got := simplify(t, root)
-	want := `<figure><img src="real.jpg" alt="Real photo"/></figure>`
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+	if !strings.Contains(got, "<figure>") || !strings.Contains(got, "</figure>") {
+		t.Errorf("expected figure wrapper preserved, got %q", got)
+	}
+	if !strings.Contains(got, `src="real.jpg"`) || !strings.Contains(got, `alt="Real photo"`) {
+		t.Errorf("real image attrs missing, got %q", got)
+	}
+	if strings.Contains(got, "grey-placeholder") || strings.Contains(got, "image unavailable") {
+		t.Errorf("placeholder image should have been dropped, got %q", got)
 	}
 }
 

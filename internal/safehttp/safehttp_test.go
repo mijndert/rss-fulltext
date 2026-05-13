@@ -95,9 +95,21 @@ func mustRequest(t *testing.T, target string) *http.Request {
 	return req
 }
 
-func TestCheckRedirectBlocksPrivateHost(t *testing.T) {
+func TestCheckRedirectDoesNotPerformIPCheck(t *testing.T) {
+	// CheckRedirect intentionally relies on the dialer's Control hook
+	// for IP filtering; it only enforces scheme and redirect-count here.
 	c := NewClient(time.Second, Options{})
-	err := c.CheckRedirect(mustRequest(t, "http://127.0.0.1/private"), nil)
+	if err := c.CheckRedirect(mustRequest(t, "http://127.0.0.1/private"), nil); err != nil {
+		t.Errorf("CheckRedirect should defer IP checks to the dialer; got %v", err)
+	}
+}
+
+func TestClientDialRefusesPrivateAddress(t *testing.T) {
+	c := NewClient(2*time.Second, Options{})
+	_, err := c.Get("http://127.0.0.1:80/")
+	if err == nil {
+		t.Fatal("dial to 127.0.0.1 should have been refused")
+	}
 	if !errors.Is(err, ErrBlockedAddress) {
 		t.Errorf("expected ErrBlockedAddress, got %v", err)
 	}

@@ -2,6 +2,7 @@ package extractor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	"github.com/microcosm-cc/bluemonday"
@@ -28,21 +30,25 @@ var (
 )
 
 type Config struct {
-	HTTPClient *http.Client
-	UserAgent  string
-	MaxBytes   int64
-	Cache      Cache
-	Sanitizer  *bluemonday.Policy
-	Logger     *slog.Logger
+	HTTPClient  *http.Client
+	UserAgent   string
+	MaxBytes    int64
+	Cache       Cache
+	CacheTTL    time.Duration
+	NegativeTTL time.Duration
+	Sanitizer   *bluemonday.Policy
+	Logger      *slog.Logger
 }
 
 type Extractor struct {
-	client    *http.Client
-	userAgent string
-	maxBytes  int64
-	cache     Cache
-	sanitizer *bluemonday.Policy
-	logger    *slog.Logger
+	client      *http.Client
+	userAgent   string
+	maxBytes    int64
+	cache       Cache
+	cacheTTL    time.Duration
+	negativeTTL time.Duration
+	sanitizer   *bluemonday.Policy
+	logger      *slog.Logger
 }
 
 func New(cfg Config) *Extractor {
@@ -55,16 +61,24 @@ func New(cfg Config) *Extractor {
 	if cfg.MaxBytes <= 0 {
 		cfg.MaxBytes = 5 * 1024 * 1024
 	}
+	if cfg.CacheTTL <= 0 {
+		cfg.CacheTTL = 24 * time.Hour
+	}
+	if cfg.NegativeTTL <= 0 {
+		cfg.NegativeTTL = time.Hour
+	}
 	if cfg.Sanitizer == nil {
 		cfg.Sanitizer = defaultPolicy()
 	}
 	return &Extractor{
-		client:    cfg.HTTPClient,
-		userAgent: cfg.UserAgent,
-		maxBytes:  cfg.MaxBytes,
-		cache:     cfg.Cache,
-		sanitizer: cfg.Sanitizer,
-		logger:    cfg.Logger,
+		client:      cfg.HTTPClient,
+		userAgent:   cfg.UserAgent,
+		maxBytes:    cfg.MaxBytes,
+		cache:       cfg.Cache,
+		cacheTTL:    cfg.CacheTTL,
+		negativeTTL: cfg.NegativeTTL,
+		sanitizer:   cfg.Sanitizer,
+		logger:      cfg.Logger,
 	}
 }
 
@@ -72,11 +86,70 @@ func (e *Extractor) Sanitize(s string) string {
 	return strings.TrimSpace(e.sanitizer.Sanitize(s))
 }
 
+type cacheEntry struct {
+	Body      string    `json:"b,omitempty"`
+	ErrClass  string    `json:"e,omitempty"`
+	ExpiresAt time.Time `json:"x"`
+}
+
+func (e *Extractor) cacheGet(key string) (cacheEntry, bool) {
+	if e.cache == nil {
+		return cacheEntry{}, false
+	}
+	raw, ok := e.cache.Get(key)
+	if !ok {
+		return cacheEntry{}, false
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		return cacheEntry{}, false
+	}
+	if !entry.ExpiresAt.IsZero() && time.Now().After(entry.ExpiresAt) {
+		return cacheEntry{}, false
+	}
+	return entry, true
+}
+
+func (e *Extractor) cacheSet(key string, entry cacheEntry) {
+	if e.cache == nil {
+		return
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	e.cache.Set(key, string(data))
+}
+
+func (e *Extractor) cacheNegative(key, class string) {
+	if e.negativeTTL <= 0 {
+		return
+	}
+	e.cacheSet(key, cacheEntry{
+		ErrClass:  class,
+		ExpiresAt: time.Now().Add(e.negativeTTL),
+	})
+}
+
+func classToErr(class string) error {
+	switch class {
+	case "upstream":
+		return ErrUpstreamStatus
+	case "unsupported":
+		return ErrUnsupportedContent
+	case "empty":
+		return ErrEmptyContent
+	default:
+		return fmt.Errorf("cached: %s", class)
+	}
+}
+
 func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, error) {
-	if e.cache != nil {
-		if v, ok := e.cache.Get(articleURL); ok {
-			return v, nil
+	if entry, ok := e.cacheGet(articleURL); ok {
+		if entry.ErrClass != "" {
+			return "", classToErr(entry.ErrClass)
 		}
+		return entry.Body, nil
 	}
 
 	parsed, err := url.Parse(articleURL)
@@ -104,16 +177,21 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			e.cacheNegative(articleURL, "upstream")
+		}
 		return "", fmt.Errorf("%w: %d", ErrUpstreamStatus, resp.StatusCode)
 	}
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		media, _, err := mime.ParseMediaType(ct)
 		if err != nil {
+			e.cacheNegative(articleURL, "unsupported")
 			return "", fmt.Errorf("%w: %q", ErrUnsupportedContent, ct)
 		}
 		media = strings.ToLower(media)
 		if media != "text/html" && media != "application/xhtml+xml" {
+			e.cacheNegative(articleURL, "unsupported")
 			return "", fmt.Errorf("%w: %s", ErrUnsupportedContent, media)
 		}
 	}
@@ -123,6 +201,7 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 		return "", fmt.Errorf("readability: %w", err)
 	}
 	if article.Node == nil {
+		e.cacheNegative(articleURL, "empty")
 		return "", ErrEmptyContent
 	}
 	simplifyDOM(article.Node)
@@ -134,11 +213,16 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 
 	content := strings.TrimSpace(e.sanitizer.Sanitize(rendered.String()))
 	if content == "" {
+		e.cacheNegative(articleURL, "empty")
 		return "", ErrEmptyContent
 	}
 
-	if e.cache != nil {
-		e.cache.Set(articleURL, content)
+	entry := cacheEntry{Body: content, ExpiresAt: time.Now().Add(e.cacheTTL)}
+	e.cacheSet(articleURL, entry)
+	if resp.Request != nil && resp.Request.URL != nil {
+		if finalURL := resp.Request.URL.String(); finalURL != "" && finalURL != articleURL {
+			e.cacheSet(finalURL, entry)
+		}
 	}
 	return content, nil
 }

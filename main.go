@@ -61,11 +61,13 @@ func main() {
 	})
 
 	ext := extractor.New(extractor.Config{
-		HTTPClient: client,
-		UserAgent:  cfg.UserAgent,
-		MaxBytes:   cfg.MaxArticleBytes,
-		Cache:      cache,
-		Logger:     logger,
+		HTTPClient:  client,
+		UserAgent:   cfg.UserAgent,
+		MaxBytes:    cfg.MaxArticleBytes,
+		Cache:       cache,
+		CacheTTL:    cfg.CacheTTL,
+		NegativeTTL: cfg.NegativeCacheTTL,
+		Logger:      logger,
 	})
 
 	tracker := generator.NewTracker()
@@ -118,6 +120,7 @@ func main() {
 			MaxItems:     cfg.MaxItemsPerFeed,
 			Concurrency:  cfg.Concurrency,
 			FeedTimeout:  cfg.FeedTimeout,
+			MaxStaleness: cfg.MaxStaleness,
 			UserAgent:    cfg.UserAgent,
 			Tracker:      tracker,
 			Logger:       logger,
@@ -198,6 +201,8 @@ type appConfig struct {
 	MaxArticleBytes       int64
 	MaxFeedBytes          int64
 	MaxItemsPerFeed       int
+	NegativeCacheTTL      time.Duration
+	MaxStaleness          time.Duration
 	UserAgent             string
 	AllowPrivateAddresses bool
 }
@@ -218,6 +223,8 @@ func loadConfig(logger *slog.Logger) (appConfig, error) {
 		MaxArticleBytes:       envInt64("MAX_ARTICLE_BYTES", 5*1024*1024, logger),
 		MaxFeedBytes:          envInt64("MAX_FEED_BYTES", 4*1024*1024, logger),
 		MaxItemsPerFeed:       envInt("MAX_ITEMS_PER_FEED", 50, logger),
+		NegativeCacheTTL:      envDuration("NEGATIVE_CACHE_TTL", time.Hour, logger),
+		MaxStaleness:          envDuration("MAX_STALENESS", 24*time.Hour, logger),
 		UserAgent:             env("USER_AGENT", "rss-fulltext/2.0"),
 		AllowPrivateAddresses: envBool("ALLOW_PRIVATE_ADDRESSES", false, logger),
 	}

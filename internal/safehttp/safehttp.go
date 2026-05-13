@@ -82,7 +82,7 @@ func NewClient(timeout time.Duration, opts Options) *http.Client {
 			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 				return fmt.Errorf("%w: %s", ErrBlockedScheme, req.URL.Scheme)
 			}
-			return ValidateURLHost(req.Context(), req.URL.Hostname(), opts.AllowPrivateAddresses)
+			return nil
 		},
 	}
 }

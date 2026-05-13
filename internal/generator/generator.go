@@ -33,6 +33,7 @@ type Status struct {
 	FileURL       string    `json:"file_url"`
 	Interval      string    `json:"interval"`
 	LastRefreshAt time.Time `json:"last_refresh_at,omitempty"`
+	LastSuccessAt time.Time `json:"last_success_at,omitempty"`
 	LastRefreshOK bool      `json:"last_refresh_ok"`
 	LastError     string    `json:"last_error,omitempty"`
 	ItemCount     int       `json:"item_count"`
@@ -56,7 +57,10 @@ func (t *Tracker) Init(name string, s Status) {
 func (t *Tracker) update(name string, mut func(*Status)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	s := t.m[name]
+	s, ok := t.m[name]
+	if !ok {
+		return
+	}
 	mut(&s)
 	t.m[name] = s
 }
@@ -80,6 +84,7 @@ type WorkerConfig struct {
 	MaxItems     int
 	Concurrency  int
 	FeedTimeout  time.Duration
+	MaxStaleness time.Duration
 	UserAgent    string
 	Tracker      *Tracker
 	Logger       *slog.Logger
@@ -101,6 +106,9 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	}
 	if cfg.FeedTimeout <= 0 {
 		cfg.FeedTimeout = 90 * time.Second
+	}
+	if cfg.MaxStaleness <= 0 {
+		cfg.MaxStaleness = 24 * time.Hour
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -140,15 +148,13 @@ func (w *Worker) Refresh(parent context.Context) error {
 
 	body, err := w.fetchFeed(ctx)
 	if err != nil {
-		w.recordError(start, err)
-		return err
+		return w.failRefresh(start, err)
 	}
 
 	parser := gofeed.NewParser()
 	parsed, err := parser.Parse(strings.NewReader(body))
 	if err != nil {
-		w.recordError(start, fmt.Errorf("parse: %w", err))
-		return err
+		return w.failRefresh(start, fmt.Errorf("parse: %w", err))
 	}
 
 	if w.cfg.MaxItems > 0 && len(parsed.Items) > w.cfg.MaxItems {
@@ -156,25 +162,21 @@ func (w *Worker) Refresh(parent context.Context) error {
 	}
 
 	out := w.buildFeed(parsed)
-	w.enrich(ctx, parsed, out)
+	if err := w.enrich(ctx, parsed, out); err != nil {
+		return w.failRefresh(start, err)
+	}
 
 	if len(out.Items) == 0 {
-		_, statErr := os.Stat(w.OutputFile())
-		if statErr == nil {
-			w.cfg.Logger.Warn("upstream returned 0 items; keeping previous output",
-				"feed", w.cfg.Feed.Name)
-			w.recordError(start, errors.New("upstream returned 0 items"))
-			return nil
-		}
+		return w.handleEmpty(start, out)
 	}
 
 	if err := w.writeAtomic(out); err != nil {
-		w.recordError(start, fmt.Errorf("write: %w", err))
-		return err
+		return w.failRefresh(start, fmt.Errorf("write: %w", err))
 	}
 
 	w.cfg.Tracker.update(w.cfg.Feed.Name, func(s *Status) {
 		s.LastRefreshAt = start
+		s.LastSuccessAt = start
 		s.LastRefreshOK = true
 		s.LastError = ""
 		s.ItemCount = len(out.Items)
@@ -187,12 +189,48 @@ func (w *Worker) Refresh(parent context.Context) error {
 	return nil
 }
 
-func (w *Worker) recordError(start time.Time, err error) {
+// handleEmpty applies the staleness policy when a refresh produces zero items.
+//
+//	no previous file              -> refuse to write, return error
+//	previous file within budget   -> keep previous, return error
+//	previous file past budget     -> overwrite with empty feed, return error
+func (w *Worker) handleEmpty(start time.Time, out *feeds.Feed) error {
+	info, statErr := os.Stat(w.OutputFile())
+	if statErr != nil {
+		return w.failRefresh(start, errors.New("upstream returned 0 items and no previous file exists"))
+	}
+
+	age := time.Since(info.ModTime())
+	if w.cfg.MaxStaleness > 0 && age > w.cfg.MaxStaleness {
+		w.cfg.Logger.Warn("0-items refresh past staleness budget; overwriting with empty feed",
+			"feed", w.cfg.Feed.Name,
+			"age", age,
+			"budget", w.cfg.MaxStaleness)
+		if err := w.writeAtomic(out); err != nil {
+			return w.failRefresh(start, fmt.Errorf("write empty: %w", err))
+		}
+		w.cfg.Tracker.update(w.cfg.Feed.Name, func(s *Status) {
+			s.LastRefreshAt = start
+			s.LastRefreshOK = false
+			s.LastError = fmt.Sprintf("upstream returned 0 items for %s (past %s budget)", age.Round(time.Second), w.cfg.MaxStaleness)
+			s.ItemCount = 0
+		})
+		return errors.New("upstream returned 0 items past staleness budget")
+	}
+
+	w.cfg.Logger.Warn("upstream returned 0 items; keeping previous output",
+		"feed", w.cfg.Feed.Name,
+		"age", age)
+	return w.failRefresh(start, errors.New("upstream returned 0 items; previous output kept"))
+}
+
+func (w *Worker) failRefresh(start time.Time, err error) error {
 	w.cfg.Tracker.update(w.cfg.Feed.Name, func(s *Status) {
 		s.LastRefreshAt = start
 		s.LastRefreshOK = false
 		s.LastError = err.Error()
 	})
+	return err
 }
 
 func (w *Worker) fetchFeed(ctx context.Context) (string, error) {
@@ -246,7 +284,7 @@ func (w *Worker) buildFeed(in *gofeed.Feed) *feeds.Feed {
 	return f
 }
 
-func (w *Worker) enrich(ctx context.Context, in *gofeed.Feed, out *feeds.Feed) {
+func (w *Worker) enrich(ctx context.Context, in *gofeed.Feed, out *feeds.Feed) error {
 	items := make([]*feeds.Item, len(in.Items))
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -268,6 +306,7 @@ func (w *Worker) enrich(ctx context.Context, in *gofeed.Feed, out *feeds.Feed) {
 			out.Items = append(out.Items, it)
 		}
 	}
+	return ctx.Err()
 }
 
 func (w *Worker) itemFor(ctx context.Context, in *gofeed.Item) *feeds.Item {

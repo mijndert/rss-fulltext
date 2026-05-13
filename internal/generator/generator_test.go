@@ -280,8 +280,8 @@ func TestRefreshSkipsWriteWhenEmptyAndPreviousExists(t *testing.T) {
 	w := newWorker(t, srv.URL, dir, &fakeExtractor{content: ""})
 	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
 
-	if err := w.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := w.Refresh(context.Background()); err == nil {
+		t.Fatal("expected Refresh to surface error on empty upstream")
 	}
 
 	body, err := os.ReadFile(prev)
@@ -298,6 +298,97 @@ func TestRefreshSkipsWriteWhenEmptyAndPreviousExists(t *testing.T) {
 	}
 	if !strings.Contains(snap[0].LastError, "0 items") {
 		t.Errorf("expected 'no items' error, got %q", snap[0].LastError)
+	}
+}
+
+func TestRefreshRefusesEmptyOnColdStart(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, emptyRSS)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	w := newWorker(t, srv.URL, dir, &fakeExtractor{})
+	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
+
+	err := w.Refresh(context.Background())
+	if err == nil {
+		t.Fatal("cold-start with 0 items should error")
+	}
+	if !strings.Contains(err.Error(), "no previous file") {
+		t.Errorf("expected 'no previous file' in error, got %q", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "sample.xml")); !os.IsNotExist(statErr) {
+		t.Error("cold-start 0-items must not write a file")
+	}
+}
+
+func TestRefreshOverwritesPastStaleness(t *testing.T) {
+	dir := t.TempDir()
+	prev := filepath.Join(dir, "sample.xml")
+	if err := os.WriteFile(prev, []byte("<rss>old</rss>"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Backdate the file well past the staleness budget.
+	stale := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(prev, stale, stale); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, emptyRSS)
+	}))
+	defer srv.Close()
+
+	w := newWorker(t, srv.URL, dir, &fakeExtractor{})
+	w.cfg.MaxStaleness = time.Hour
+	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
+
+	if err := w.Refresh(context.Background()); err == nil {
+		t.Fatal("expected error from staleness overwrite")
+	}
+	body, err := os.ReadFile(prev)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if strings.Contains(string(body), "old") {
+		t.Errorf("stale content should have been overwritten, got: %s", body)
+	}
+	if !strings.Contains(string(body), "<rss") {
+		t.Errorf("expected fresh empty RSS file to be written, got: %s", body)
+	}
+}
+
+func TestRefreshSetsLastSuccessAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, sampleRSS)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	w := newWorker(t, srv.URL, dir, &fakeExtractor{content: "<p>body</p>"})
+	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
+
+	if err := w.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	snap := w.cfg.Tracker.Snapshot()
+	if len(snap) != 1 || snap[0].LastSuccessAt.IsZero() {
+		t.Errorf("expected LastSuccessAt to be set on success, got %+v", snap)
+	}
+	if !snap[0].LastRefreshOK {
+		t.Errorf("expected LastRefreshOK=true, got %+v", snap)
+	}
+}
+
+func TestTrackerUpdateUnknownNameIsNoOp(t *testing.T) {
+	tr := NewTracker()
+	tr.update("never-initialised", func(s *Status) { s.ItemCount = 99 })
+	if got := tr.Snapshot(); len(got) != 0 {
+		t.Errorf("update on unknown name should be a no-op, got %+v", got)
 	}
 }
 

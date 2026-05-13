@@ -157,3 +157,101 @@ func TestExtractUsesCache(t *testing.T) {
 		t.Errorf("expected 1 upstream hit (second call served from cache), got %d", got)
 	}
 }
+
+func TestExtractNegativeCachesOn4xx(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "gone", http.StatusGone)
+	}))
+	defer srv.Close()
+
+	cache := newMemCache()
+	e := newExtractor(t, cache)
+
+	if _, err := e.Extract(context.Background(), srv.URL+"/dead"); !errors.Is(err, ErrUpstreamStatus) {
+		t.Fatalf("first: expected ErrUpstreamStatus, got %v", err)
+	}
+	if _, err := e.Extract(context.Background(), srv.URL+"/dead"); !errors.Is(err, ErrUpstreamStatus) {
+		t.Fatalf("second: expected ErrUpstreamStatus from cache, got %v", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("expected 1 upstream hit (negative cache), got %d", got)
+	}
+}
+
+func TestExtractDoesNotNegativeCacheOn5xx(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cache := newMemCache()
+	e := newExtractor(t, cache)
+
+	for i := 0; i < 2; i++ {
+		if _, err := e.Extract(context.Background(), srv.URL+"/x"); !errors.Is(err, ErrUpstreamStatus) {
+			t.Fatalf("call %d: expected ErrUpstreamStatus, got %v", i, err)
+		}
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("5xx should not be negative-cached; expected 2 upstream hits, got %d", got)
+	}
+}
+
+func TestExtractNegativeCachesOnUnsupportedContent(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	cache := newMemCache()
+	e := newExtractor(t, cache)
+
+	for i := 0; i < 3; i++ {
+		if _, err := e.Extract(context.Background(), srv.URL+"/x"); !errors.Is(err, ErrUnsupportedContent) {
+			t.Fatalf("call %d: expected ErrUnsupportedContent, got %v", i, err)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Errorf("expected unsupported-content to be negative-cached, got %d upstream hits", got)
+	}
+}
+
+func TestExtractCachesPostRedirectURL(t *testing.T) {
+	var canonHits, redirHits atomic.Int64
+
+	canon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		canonHits.Add(1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, articleHTML)
+	}))
+	defer canon.Close()
+
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirHits.Add(1)
+		http.Redirect(w, r, canon.URL+"/canon", http.StatusFound)
+	}))
+	defer redir.Close()
+
+	cache := newMemCache()
+	e := newExtractor(t, cache)
+
+	if _, err := e.Extract(context.Background(), redir.URL+"/short"); err != nil {
+		t.Fatalf("via redirect: %v", err)
+	}
+	if _, err := e.Extract(context.Background(), canon.URL+"/canon"); err != nil {
+		t.Fatalf("via canonical: %v", err)
+	}
+	if got := canonHits.Load(); got != 1 {
+		t.Errorf("canonical should be hit only once (second call cached), got %d", got)
+	}
+	if got := redirHits.Load(); got != 1 {
+		t.Errorf("redirector should be hit only once, got %d", got)
+	}
+}
