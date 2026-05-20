@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,13 +19,102 @@ import (
 	"rss-fulltext/internal/extractor"
 	"rss-fulltext/internal/filecache"
 	"rss-fulltext/internal/generator"
+	"rss-fulltext/internal/metrics"
 	"rss-fulltext/internal/safehttp"
 	"rss-fulltext/internal/server"
 )
 
+// Version metadata populated by goreleaser via -ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-v":
+			fmt.Printf("rss-fulltext %s (commit %s, built %s)\n", version, commit, date)
+			return
+		case "healthcheck":
+			os.Exit(runHealthcheck())
+		case "help", "--help", "-h":
+			printUsage(os.Stdout)
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", os.Args[1])
+			printUsage(os.Stderr)
+			os.Exit(2)
+		}
+	}
+	runServer()
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: rss-fulltext [healthcheck|version|help]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "  (no args)     run the HTTP server and refresh workers")
+	fmt.Fprintln(w, "  healthcheck   probe http://127.0.0.1:<port>/healthz, exit 0 on success")
+	fmt.Fprintln(w, "  version       print the version and exit")
+	fmt.Fprintln(w, "  help          print this message")
+}
+
+// runHealthcheck performs an HTTP GET against the local /healthz endpoint
+// and returns 0 on a 2xx response.
+func runHealthcheck() int {
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:8080"
+	}
+	target, err := healthcheckURL(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: bad LISTEN_ADDR %q: %v\n", addr, err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: build request: %v\n", err)
+		return 1
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
+// healthcheckURL maps a LISTEN_ADDR value to a probe URL pointing at the
+// local interface. Wildcard hosts are rewritten to a valid destination
+// (loopback) so the probe still reaches the server when bound to all
+// interfaces.
+func healthcheckURL(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/healthz", nil
+}
+
+func runServer() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	logger.Info("starting", "version", version, "commit", commit)
 
 	cfg, err := loadConfig(logger)
 	if err != nil {
@@ -60,6 +151,8 @@ func main() {
 		AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 	})
 
+	mx := metrics.New()
+
 	ext := extractor.New(extractor.Config{
 		HTTPClient:  client,
 		UserAgent:   cfg.UserAgent,
@@ -67,6 +160,7 @@ func main() {
 		Cache:       cache,
 		CacheTTL:    cfg.CacheTTL,
 		NegativeTTL: cfg.NegativeCacheTTL,
+		Metrics:     mx,
 		Logger:      logger,
 	})
 
@@ -77,13 +171,19 @@ func main() {
 			Title:     f.Title,
 			SourceURL: f.URL,
 			FileURL:   "/" + f.Name + ".xml",
-			Interval:  f.Interval.String(),
+			Formats: map[string]string{
+				"rss":  "/" + f.Name + ".xml",
+				"atom": "/" + f.Name + ".atom",
+				"json": "/" + f.Name + ".json",
+			},
+			Interval: f.Interval.String(),
 		})
 	}
 
 	srv := server.New(server.Config{
 		OutputDir: cfg.OutputDir,
 		Tracker:   tracker,
+		Metrics:   mx.Handler(),
 		Logger:    logger,
 	})
 
@@ -123,6 +223,7 @@ func main() {
 			MaxStaleness: cfg.MaxStaleness,
 			UserAgent:    cfg.UserAgent,
 			Tracker:      tracker,
+			Metrics:      mx,
 			Logger:       logger,
 		})
 		delay := time.Duration(i) * 500 * time.Millisecond

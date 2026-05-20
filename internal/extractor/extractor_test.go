@@ -45,6 +45,37 @@ func newExtractor(t *testing.T, cache Cache) *Extractor {
 	})
 }
 
+type recordingMetrics struct {
+	mu       sync.Mutex
+	outcomes []string
+}
+
+func (r *recordingMetrics) RecordExtract(outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.outcomes = append(r.outcomes, outcome)
+}
+
+func (r *recordingMetrics) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.outcomes))
+	copy(out, r.outcomes)
+	return out
+}
+
+func newExtractorWithMetrics(t *testing.T, cache Cache, m Metrics) *Extractor {
+	t.Helper()
+	return New(Config{
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
+		UserAgent:  "test/1.0",
+		MaxBytes:   1 << 20,
+		Cache:      cache,
+		Metrics:    m,
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+}
+
 func TestSanitizeStripsScripts(t *testing.T) {
 	e := newExtractor(t, nil)
 	got := e.Sanitize(`<p>Hello</p><script>alert(1)</script>`)
@@ -220,6 +251,97 @@ func TestExtractNegativeCachesOnUnsupportedContent(t *testing.T) {
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("expected unsupported-content to be negative-cached, got %d upstream hits", got)
+	}
+}
+
+func TestExtractRecordsOutcomes(t *testing.T) {
+	htmlServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, articleHTML)
+	}))
+	defer htmlServer.Close()
+
+	gone := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "gone", http.StatusGone)
+	}))
+	defer gone.Close()
+
+	jsonServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer jsonServer.Close()
+
+	emptyHTML := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<html><head></head><body></body></html>`)
+	}))
+	defer emptyHTML.Close()
+
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"ok", htmlServer.URL + "/article", "ok"},
+		{"invalid-url", "not-a-url", "invalid_url"},
+		{"bad-scheme", "ftp://example.com/x", "invalid_url"},
+		{"fetch-error", "http://127.0.0.1:1/dead", "fetch_error"},
+		{"upstream-4xx", gone.URL + "/dead", "upstream"},
+		{"unsupported", jsonServer.URL + "/x", "unsupported"},
+		{"empty", emptyHTML.URL + "/x", "empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingMetrics{}
+			e := newExtractorWithMetrics(t, nil, rec)
+			_, _ = e.Extract(context.Background(), tc.url)
+			got := rec.snapshot()
+			if len(got) != 1 || got[0] != tc.want {
+				t.Errorf("outcomes = %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractRecordsCacheOutcomes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, articleHTML)
+	}))
+	defer srv.Close()
+
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "gone", http.StatusGone)
+	}))
+	defer dead.Close()
+
+	cache := newMemCache()
+	rec := &recordingMetrics{}
+	e := newExtractorWithMetrics(t, cache, rec)
+
+	if _, err := e.Extract(context.Background(), srv.URL+"/a"); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+	if _, err := e.Extract(context.Background(), srv.URL+"/a"); err != nil {
+		t.Fatalf("cache hit: %v", err)
+	}
+	if _, err := e.Extract(context.Background(), dead.URL+"/dead"); err == nil {
+		t.Fatal("expected 4xx error")
+	}
+	if _, err := e.Extract(context.Background(), dead.URL+"/dead"); err == nil {
+		t.Fatal("expected cached 4xx error")
+	}
+
+	got := rec.snapshot()
+	want := []string{"ok", "cache_hit", "upstream", "cache_negative"}
+	if len(got) != len(want) {
+		t.Fatalf("outcomes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("outcome[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

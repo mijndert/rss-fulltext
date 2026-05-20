@@ -26,17 +26,24 @@ type Extractor interface {
 	Sanitize(s string) string
 }
 
+// Metrics is the optional metric sink for the generator. Pass nil to disable.
+type Metrics interface {
+	RecordRefresh(feed, outcome string, duration time.Duration)
+	RecordRefreshSuccess(feed string, at time.Time, items int)
+}
+
 type Status struct {
-	Name          string    `json:"name"`
-	Title         string    `json:"title,omitempty"`
-	SourceURL     string    `json:"source_url"`
-	FileURL       string    `json:"file_url"`
-	Interval      string    `json:"interval"`
-	LastRefreshAt time.Time `json:"last_refresh_at,omitempty"`
-	LastSuccessAt time.Time `json:"last_success_at,omitempty"`
-	LastRefreshOK bool      `json:"last_refresh_ok"`
-	LastError     string    `json:"last_error,omitempty"`
-	ItemCount     int       `json:"item_count"`
+	Name          string            `json:"name"`
+	Title         string            `json:"title,omitempty"`
+	SourceURL     string            `json:"source_url"`
+	FileURL       string            `json:"file_url"`
+	Formats       map[string]string `json:"formats,omitempty"`
+	Interval      string            `json:"interval"`
+	LastRefreshAt time.Time         `json:"last_refresh_at,omitempty"`
+	LastSuccessAt time.Time         `json:"last_success_at,omitempty"`
+	LastRefreshOK bool              `json:"last_refresh_ok"`
+	LastError     string            `json:"last_error,omitempty"`
+	ItemCount     int               `json:"item_count"`
 }
 
 type Tracker struct {
@@ -87,6 +94,7 @@ type WorkerConfig struct {
 	MaxStaleness time.Duration
 	UserAgent    string
 	Tracker      *Tracker
+	Metrics      Metrics
 	Logger       *slog.Logger
 }
 
@@ -141,10 +149,20 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) Refresh(parent context.Context) error {
+func (w *Worker) Refresh(parent context.Context) (err error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(parent, w.cfg.FeedTimeout)
 	defer cancel()
+	defer func() {
+		if w.cfg.Metrics == nil {
+			return
+		}
+		outcome := "ok"
+		if err != nil {
+			outcome = "fail"
+		}
+		w.cfg.Metrics.RecordRefresh(w.cfg.Feed.Name, outcome, time.Since(start))
+	}()
 
 	body, err := w.fetchFeed(ctx)
 	if err != nil {
@@ -170,7 +188,7 @@ func (w *Worker) Refresh(parent context.Context) error {
 		return w.handleEmpty(start, out)
 	}
 
-	if err := w.writeAtomic(out); err != nil {
+	if err := w.writeOutputs(out); err != nil {
 		return w.failRefresh(start, fmt.Errorf("write: %w", err))
 	}
 
@@ -181,6 +199,9 @@ func (w *Worker) Refresh(parent context.Context) error {
 		s.LastError = ""
 		s.ItemCount = len(out.Items)
 	})
+	if w.cfg.Metrics != nil {
+		w.cfg.Metrics.RecordRefreshSuccess(w.cfg.Feed.Name, start, len(out.Items))
+	}
 	w.cfg.Logger.Info("refreshed",
 		"feed", w.cfg.Feed.Name,
 		"items", len(out.Items),
@@ -206,7 +227,7 @@ func (w *Worker) handleEmpty(start time.Time, out *feeds.Feed) error {
 			"feed", w.cfg.Feed.Name,
 			"age", age,
 			"budget", w.cfg.MaxStaleness)
-		if err := w.writeAtomic(out); err != nil {
+		if err := w.writeOutputs(out); err != nil {
 			return w.failRefresh(start, fmt.Errorf("write empty: %w", err))
 		}
 		w.cfg.Tracker.update(w.cfg.Feed.Name, func(s *Status) {
@@ -339,47 +360,106 @@ func (w *Worker) itemFor(ctx context.Context, in *gofeed.Item) *feeds.Item {
 	return item
 }
 
-func (w *Worker) writeAtomic(out *feeds.Feed) error {
+// outputFormats lists every serialization the worker emits per refresh.
+// Order matters only for cleanup semantics: all temp files are staged first,
+// then renamed in this order, so .xml (the primary, also used for staleness
+// checks) is published before its alternates.
+var outputFormats = []struct {
+	ext   string
+	write func(*feeds.Feed, io.Writer) error
+}{
+	{".xml", func(f *feeds.Feed, w io.Writer) error { return f.WriteRss(w) }},
+	{".atom", func(f *feeds.Feed, w io.Writer) error { return f.WriteAtom(w) }},
+	{".json", func(f *feeds.Feed, w io.Writer) error { return f.WriteJSON(w) }},
+}
+
+// writeOutputs writes every format in outputFormats to disk.
+//
+// Atomicity policy: all formats are staged (write + fsync + chmod) to dotfile
+// temp files in the output dir before any rename happens. A staging failure
+// surfaces as an error and leaves the previous published files untouched.
+//
+// Rename phase: temp files are renamed into place sequentially. Rename within
+// a single directory after fsync is effectively infallible on the filesystems
+// we run on (ext4, APFS), so partial-rename failure is unreachable in
+// practice. If it does happen (e.g. ENOSPC, EROFS race), readers may briefly
+// see a mix of fresh and stale formats for one feed — the next refresh
+// restores consistency. We accept this rather than carrying backup copies of
+// each previous file just to support an unreachable rollback.
+func (w *Worker) writeOutputs(out *feeds.Feed) error {
 	if err := os.MkdirAll(w.cfg.OutputDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
-	final := w.OutputFile()
-	tmp, err := os.CreateTemp(w.cfg.OutputDir, "."+w.cfg.Feed.Name+".xml.*")
-	if err != nil {
-		return fmt.Errorf("tempfile: %w", err)
-	}
-	name := tmp.Name()
+
+	type staged struct{ tmp, final string }
+	stagedFiles := make([]staged, 0, len(outputFormats))
 	cleanup := true
 	defer func() {
 		if cleanup {
+			for _, s := range stagedFiles {
+				_ = os.Remove(s.tmp)
+			}
+		}
+	}()
+
+	for _, f := range outputFormats {
+		final := filepath.Join(w.cfg.OutputDir, w.cfg.Feed.Name+f.ext)
+		name, err := w.stageFile(out, f.ext, f.write)
+		if err != nil {
+			return err
+		}
+		stagedFiles = append(stagedFiles, staged{tmp: name, final: final})
+	}
+
+	// Past this point the deferred cleanup must not delete files we've already
+	// renamed into place. Disable it; per-iteration failures leave only the
+	// not-yet-renamed temp files, which we remove inline.
+	cleanup = false
+	for i, s := range stagedFiles {
+		if err := os.Rename(s.tmp, s.final); err != nil {
+			for _, leftover := range stagedFiles[i:] {
+				_ = os.Remove(leftover.tmp)
+			}
+			return fmt.Errorf("rename %s: %w", filepath.Base(s.final), err)
+		}
+	}
+	return nil
+}
+
+func (w *Worker) stageFile(out *feeds.Feed, ext string, write func(*feeds.Feed, io.Writer) error) (string, error) {
+	tmp, err := os.CreateTemp(w.cfg.OutputDir, "."+w.cfg.Feed.Name+ext+".*")
+	if err != nil {
+		return "", fmt.Errorf("tempfile %s: %w", ext, err)
+	}
+	name := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
 			_ = os.Remove(name)
 		}
 	}()
 
 	bw := bufio.NewWriter(tmp)
-	if err := out.WriteRss(bw); err != nil {
+	if err := write(out, bw); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write rss: %w", err)
+		return "", fmt.Errorf("write %s: %w", ext, err)
 	}
 	if err := bw.Flush(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("flush: %w", err)
+		return "", fmt.Errorf("flush %s: %w", ext, err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("sync: %w", err)
+		return "", fmt.Errorf("sync %s: %w", ext, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close: %w", err)
+		return "", fmt.Errorf("close %s: %w", ext, err)
 	}
 	if err := os.Chmod(name, 0o644); err != nil {
-		return fmt.Errorf("chmod: %w", err)
+		return "", fmt.Errorf("chmod %s: %w", ext, err)
 	}
-	if err := os.Rename(name, final); err != nil {
-		return fmt.Errorf("rename: %w", err)
-	}
-	cleanup = false
-	return nil
+	ok = true
+	return name, nil
 }
 
 func firstNonEmpty(vs ...string) string {

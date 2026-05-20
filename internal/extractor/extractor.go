@@ -22,6 +22,11 @@ type Cache interface {
 	Set(key, value string)
 }
 
+// Metrics is the optional metric sink for the extractor. Pass nil to disable.
+type Metrics interface {
+	RecordExtract(outcome string)
+}
+
 var (
 	ErrInvalidURL         = errors.New("invalid article url")
 	ErrUpstreamStatus     = errors.New("upstream returned non-2xx")
@@ -37,6 +42,7 @@ type Config struct {
 	CacheTTL    time.Duration
 	NegativeTTL time.Duration
 	Sanitizer   *bluemonday.Policy
+	Metrics     Metrics
 	Logger      *slog.Logger
 }
 
@@ -48,6 +54,7 @@ type Extractor struct {
 	cacheTTL    time.Duration
 	negativeTTL time.Duration
 	sanitizer   *bluemonday.Policy
+	metrics     Metrics
 	logger      *slog.Logger
 }
 
@@ -78,7 +85,14 @@ func New(cfg Config) *Extractor {
 		cacheTTL:    cfg.CacheTTL,
 		negativeTTL: cfg.NegativeTTL,
 		sanitizer:   cfg.Sanitizer,
+		metrics:     cfg.Metrics,
 		logger:      cfg.Logger,
+	}
+}
+
+func (e *Extractor) recordOutcome(outcome string) {
+	if e.metrics != nil {
+		e.metrics.RecordExtract(outcome)
 	}
 }
 
@@ -145,23 +159,33 @@ func classToErr(class string) error {
 }
 
 func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, error) {
+	// outcome defaults to "error" so any return-path we forget to label still
+	// gets counted somewhere. Update it as we classify failures and success.
+	outcome := "error"
+	defer func() { e.recordOutcome(outcome) }()
+
 	if entry, ok := e.cacheGet(articleURL); ok {
 		if entry.ErrClass != "" {
+			outcome = "cache_negative"
 			return "", classToErr(entry.ErrClass)
 		}
+		outcome = "cache_hit"
 		return entry.Body, nil
 	}
 
 	parsed, err := url.Parse(articleURL)
 	if err != nil {
+		outcome = "invalid_url"
 		return "", fmt.Errorf("%w: %v", ErrInvalidURL, err)
 	}
 	if !parsed.IsAbs() || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		outcome = "invalid_url"
 		return "", fmt.Errorf("%w: scheme must be http(s)", ErrInvalidURL)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, articleURL, nil)
 	if err != nil {
+		outcome = "fetch_error"
 		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("User-Agent", e.userAgent)
@@ -169,6 +193,7 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 
 	resp, err := e.client.Do(req)
 	if err != nil {
+		outcome = "fetch_error"
 		return "", fmt.Errorf("fetch article: %w", err)
 	}
 	defer func() {
@@ -177,6 +202,7 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		outcome = "upstream"
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			e.cacheNegative(articleURL, "upstream")
 		}
@@ -186,11 +212,13 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		media, _, err := mime.ParseMediaType(ct)
 		if err != nil {
+			outcome = "unsupported"
 			e.cacheNegative(articleURL, "unsupported")
 			return "", fmt.Errorf("%w: %q", ErrUnsupportedContent, ct)
 		}
 		media = strings.ToLower(media)
 		if media != "text/html" && media != "application/xhtml+xml" {
+			outcome = "unsupported"
 			e.cacheNegative(articleURL, "unsupported")
 			return "", fmt.Errorf("%w: %s", ErrUnsupportedContent, media)
 		}
@@ -198,9 +226,11 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 
 	article, err := readability.FromReader(io.LimitReader(resp.Body, e.maxBytes), parsed)
 	if err != nil {
+		outcome = "render_error"
 		return "", fmt.Errorf("readability: %w", err)
 	}
 	if article.Node == nil {
+		outcome = "empty"
 		e.cacheNegative(articleURL, "empty")
 		return "", ErrEmptyContent
 	}
@@ -208,11 +238,13 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 
 	var rendered strings.Builder
 	if err := article.RenderHTML(&rendered); err != nil {
+		outcome = "render_error"
 		return "", fmt.Errorf("readability render: %w", err)
 	}
 
 	content := strings.TrimSpace(e.sanitizer.Sanitize(rendered.String()))
 	if content == "" {
+		outcome = "empty"
 		e.cacheNegative(articleURL, "empty")
 		return "", ErrEmptyContent
 	}
@@ -224,5 +256,6 @@ func (e *Extractor) Extract(ctx context.Context, articleURL string) (string, err
 			e.cacheSet(finalURL, entry)
 		}
 	}
+	outcome = "ok"
 	return content, nil
 }

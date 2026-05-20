@@ -71,21 +71,69 @@ func TestFeedsJSON(t *testing.T) {
 	}
 }
 
-func TestServesXMLFile(t *testing.T) {
+func TestServesFeedFiles(t *testing.T) {
 	s, dir := newTestServer(t)
-	if err := os.WriteFile(filepath.Join(dir, "example.xml"), []byte("<rss/>"), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
+	for _, name := range []string{"example.xml", "example.atom", "example.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("payload"), 0o644); err != nil {
+			t.Fatalf("write fixture %s: %v", name, err)
+		}
 	}
 
-	rec := doRequest(t, s.Routes(), "/example.xml")
+	cases := []struct {
+		path string
+		ct   string
+	}{
+		{"/example.xml", "application/rss+xml"},
+		{"/example.atom", "application/atom+xml"},
+		{"/example.json", "application/feed+json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := doRequest(t, s.Routes(), tc.path)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, tc.ct) {
+				t.Errorf("content-type = %q, want %q", ct, tc.ct)
+			}
+			if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Error("X-Content-Type-Options header missing")
+			}
+		})
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	tr := generator.NewTracker()
+	tr.Init("example", generator.Status{Name: "example"})
+	metricsHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("rss_fulltext_test 1\n"))
+	})
+	s := New(Config{
+		OutputDir: dir,
+		Tracker:   tr,
+		Metrics:   metricsHandler,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	rec := doRequest(t, s.Routes(), "/metrics")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/rss+xml") {
-		t.Errorf("content-type = %q, want rss+xml", ct)
+	if !strings.Contains(rec.Body.String(), "rss_fulltext_test 1") {
+		t.Errorf("metrics body unexpected: %s", rec.Body.String())
 	}
-	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Error("X-Content-Type-Options header missing")
+}
+
+func TestMetricsEndpointDisabledWhenNil(t *testing.T) {
+	// When no metrics handler is configured, /metrics should not be mounted
+	// and the fallback static handler will reject it (no .xml extension).
+	s, _ := newTestServer(t)
+	rec := doRequest(t, s.Routes(), "/metrics")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
 	}
 }
 
