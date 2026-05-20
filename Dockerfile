@@ -25,4 +25,6 @@ COPY --from=build --chown=nonroot:nonroot /out/data /var/lib/rss-fulltext
 EXPOSE 8080
 USER nonroot:nonroot
 VOLUME ["/var/lib/rss-fulltext"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/rss-fulltext", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/rss-fulltext"]
