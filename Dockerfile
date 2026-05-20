@@ -18,7 +18,7 @@ RUN go build -ldflags="-s -w" -o /out/rss-fulltext ./
 RUN mkdir -p /out/data/feeds /out/data/cache && \
     chown -R 65532:65532 /out/data
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:a9329520abc449e3b14d5bc3a6ffae065bdde0f02667fa10880c49b35c109fd1
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
 COPY --from=build /out/rss-fulltext /usr/local/bin/rss-fulltext
 COPY --from=build --chown=nonroot:nonroot /out/data /var/lib/rss-fulltext
 
