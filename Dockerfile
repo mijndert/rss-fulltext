@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.26-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 
 ENV CGO_ENABLED=0 \
@@ -18,7 +18,7 @@ RUN go build -ldflags="-s -w" -o /out/rss-fulltext ./
 RUN mkdir -p /out/data/feeds /out/data/cache && \
     chown -R 65532:65532 /out/data
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/rss-fulltext /usr/local/bin/rss-fulltext
 COPY --from=build --chown=nonroot:nonroot /out/data /var/lib/rss-fulltext
 
