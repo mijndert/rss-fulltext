@@ -191,6 +191,55 @@ func TestRefreshWritesFeed(t *testing.T) {
 	}
 }
 
+func TestRefreshWritesAllFormats(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/rss+xml")
+		_, _ = io.WriteString(w, sampleRSS)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	w := newWorker(t, srv.URL, dir, &fakeExtractor{content: "extracted-body-marker"})
+	w.cfg.Tracker.Init(w.cfg.Feed.Name, Status{Name: w.cfg.Feed.Name})
+
+	if err := w.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	cases := []struct {
+		ext      string
+		contains []string
+	}{
+		{".xml", []string{"<rss", "Item One", "extracted-body-marker"}},
+		{".atom", []string{"<feed", "Item One", "extracted-body-marker"}},
+		{".json", []string{`"version"`, "Item One", "extracted-body-marker"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.ext, func(t *testing.T) {
+			body, err := os.ReadFile(filepath.Join(dir, "sample"+tc.ext))
+			if err != nil {
+				t.Fatalf("read %s output: %v", tc.ext, err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(string(body), want) {
+					t.Errorf("%s output missing %q. body=%s", tc.ext, want, body)
+				}
+			}
+		})
+	}
+
+	// No stray dotfiles (temp files) should be left behind.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Errorf("unexpected leftover temp file: %s", e.Name())
+		}
+	}
+}
+
 const maliciousRSS = `<?xml version="1.0"?>
 <rss version="2.0"><channel>
 <title>Malicious</title>

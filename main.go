@@ -17,6 +17,7 @@ import (
 	"rss-fulltext/internal/extractor"
 	"rss-fulltext/internal/filecache"
 	"rss-fulltext/internal/generator"
+	"rss-fulltext/internal/metrics"
 	"rss-fulltext/internal/safehttp"
 	"rss-fulltext/internal/server"
 )
@@ -60,6 +61,8 @@ func main() {
 		AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 	})
 
+	mx := metrics.New()
+
 	ext := extractor.New(extractor.Config{
 		HTTPClient:  client,
 		UserAgent:   cfg.UserAgent,
@@ -67,6 +70,7 @@ func main() {
 		Cache:       cache,
 		CacheTTL:    cfg.CacheTTL,
 		NegativeTTL: cfg.NegativeCacheTTL,
+		Metrics:     mx,
 		Logger:      logger,
 	})
 
@@ -77,13 +81,19 @@ func main() {
 			Title:     f.Title,
 			SourceURL: f.URL,
 			FileURL:   "/" + f.Name + ".xml",
-			Interval:  f.Interval.String(),
+			Formats: map[string]string{
+				"rss":  "/" + f.Name + ".xml",
+				"atom": "/" + f.Name + ".atom",
+				"json": "/" + f.Name + ".json",
+			},
+			Interval: f.Interval.String(),
 		})
 	}
 
 	srv := server.New(server.Config{
 		OutputDir: cfg.OutputDir,
 		Tracker:   tracker,
+		Metrics:   mx.Handler(),
 		Logger:    logger,
 	})
 
@@ -123,6 +133,7 @@ func main() {
 			MaxStaleness: cfg.MaxStaleness,
 			UserAgent:    cfg.UserAgent,
 			Tracker:      tracker,
+			Metrics:      mx,
 			Logger:       logger,
 		})
 		delay := time.Duration(i) * 500 * time.Millisecond
