@@ -165,20 +165,20 @@ func runServer() {
 	})
 
 	tracker := generator.NewTracker()
-	for _, f := range feeds.Feeds {
-		tracker.Init(f.Name, generator.Status{
-			Name:      f.Name,
-			Title:     f.Title,
-			SourceURL: f.URL,
-			FileURL:   "/" + f.Name + ".xml",
-			Formats: map[string]string{
-				"rss":  "/" + f.Name + ".xml",
-				"atom": "/" + f.Name + ".atom",
-				"json": "/" + f.Name + ".json",
-			},
-			Interval: f.Interval.String(),
-		})
-	}
+	mgr := generator.NewManager(generator.ManagerConfig{
+		HTTPClient:   client,
+		Extractor:    ext,
+		OutputDir:    cfg.OutputDir,
+		MaxFeedBytes: cfg.MaxFeedBytes,
+		MaxItems:     cfg.MaxItemsPerFeed,
+		Concurrency:  cfg.Concurrency,
+		FeedTimeout:  cfg.FeedTimeout,
+		MaxStaleness: cfg.MaxStaleness,
+		UserAgent:    cfg.UserAgent,
+		Tracker:      tracker,
+		Metrics:      mx,
+		Logger:       logger,
+	})
 
 	srv := server.New(server.Config{
 		OutputDir: cfg.OutputDir,
@@ -210,33 +210,19 @@ func runServer() {
 
 	var wg sync.WaitGroup
 
-	for i, f := range feeds.Feeds {
-		w := generator.NewWorker(generator.WorkerConfig{
-			Feed:         f,
-			HTTPClient:   client,
-			Extractor:    ext,
-			OutputDir:    cfg.OutputDir,
-			MaxFeedBytes: cfg.MaxFeedBytes,
-			MaxItems:     cfg.MaxItemsPerFeed,
-			Concurrency:  cfg.Concurrency,
-			FeedTimeout:  cfg.FeedTimeout,
-			MaxStaleness: cfg.MaxStaleness,
-			UserAgent:    cfg.UserAgent,
-			Tracker:      tracker,
-			Metrics:      mx,
-			Logger:       logger,
-		})
-		delay := time.Duration(i) * 500 * time.Millisecond
+	mgr.Apply(ctx, feeds.Feeds)
+
+	if cfg.ReloadInterval > 0 {
+		logger.Info("watching config for changes", "path", cfg.ConfigPath, "interval", cfg.ReloadInterval)
 		wg.Add(1)
-		go func(w *generator.Worker, d time.Duration) {
+		go func() {
 			defer wg.Done()
-			select {
-			case <-time.After(d):
-			case <-ctx.Done():
-				return
-			}
-			w.Run(ctx)
-		}(w, delay)
+			config.Watch(ctx, cfg.ConfigPath, cfg.ReloadInterval, func(f *config.File) {
+				mgr.Apply(ctx, f.Feeds)
+			}, logger)
+		}()
+	} else {
+		logger.Info("config live reload disabled (CONFIG_RELOAD_INTERVAL=0)")
 	}
 
 	if cfg.JanitorInterval > 0 {
@@ -275,6 +261,7 @@ func runServer() {
 
 	stop()
 	wg.Wait()
+	mgr.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -294,6 +281,7 @@ type appConfig struct {
 	CacheDir              string
 	CacheTTL              time.Duration
 	JanitorInterval       time.Duration
+	ReloadInterval        time.Duration
 	Concurrency           int
 	RequestTimeout        time.Duration
 	ReadTimeout           time.Duration
@@ -316,6 +304,7 @@ func loadConfig(logger *slog.Logger) (appConfig, error) {
 		CacheDir:              env("CACHE_DIR", "/var/lib/rss-fulltext/cache"),
 		CacheTTL:              envDuration("CACHE_TTL", 24*time.Hour, logger),
 		JanitorInterval:       envDuration("JANITOR_INTERVAL", time.Hour, logger),
+		ReloadInterval:        envDuration("CONFIG_RELOAD_INTERVAL", 2*time.Second, logger),
 		Concurrency:           envInt("CONCURRENCY", 4, logger),
 		RequestTimeout:        envDuration("REQUEST_TIMEOUT", 20*time.Second, logger),
 		ReadTimeout:           envDuration("READ_TIMEOUT", 30*time.Second, logger),

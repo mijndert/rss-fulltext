@@ -23,10 +23,11 @@ Useful when you want to:
 ### One-line Docker
 
 ```sh
-curl -O https://raw.githubusercontent.com/mijndert/rss-fulltext/main/feeds.yaml
+mkdir -p config
+curl -o config/feeds.yaml https://raw.githubusercontent.com/mijndert/rss-fulltext/main/config/feeds.yaml
 docker run -d --name rss-fulltext \
   -p 127.0.0.1:8080:8080 \
-  -v "$PWD/feeds.yaml:/etc/rss-fulltext/feeds.yaml:ro" \
+  -v "$PWD/config:/etc/rss-fulltext:ro" \
   -v rss-fulltext-data:/var/lib/rss-fulltext \
   -e LISTEN_ADDR=:8080 \
   -e CONFIG_PATH=/etc/rss-fulltext/feeds.yaml \
@@ -35,6 +36,9 @@ docker run -d --name rss-fulltext \
   --security-opt=no-new-privileges:true \
   ghcr.io/mijndert/rss-fulltext:latest
 ```
+
+The config **directory** is mounted (not the single file) so that edits to
+`config/feeds.yaml` are picked up live — see [Live reload](#live-reload).
 
 The `--read-only`, `--cap-drop=ALL`, and `--security-opt=no-new-privileges`
 flags match the hardening that Compose applies by default — the named volume
@@ -66,6 +70,10 @@ cd rss-fulltext
 docker compose up -d
 ```
 
+The repo ships a starter `config/feeds.yaml`; Compose mounts the `config/`
+directory read-only. Edit `config/feeds.yaml` and your changes apply live — no
+restart needed (see [Live reload](#live-reload)).
+
 Compose binds the published port to loopback (`127.0.0.1:8080`). To expose
 externally, put a reverse proxy in front of it — see [Reverse proxy](#reverse-proxy)
 below.
@@ -77,7 +85,7 @@ the [Releases page](https://github.com/mijndert/rss-fulltext/releases). Verify
 the tarball against `checksums.txt`, extract, and run:
 
 ```sh
-CONFIG_PATH=./feeds.yaml OUTPUT_DIR=./out CACHE_DIR=./cache ./rss-fulltext
+CONFIG_PATH=./config/feeds.yaml OUTPUT_DIR=./out CACHE_DIR=./cache ./rss-fulltext
 ```
 
 The binary also accepts a few subcommands:
@@ -105,18 +113,40 @@ feeds:
     title: Hacker News (full text)
 ```
 
-Edit `feeds.yaml` and restart the container to pick up changes:
+Edit `config/feeds.yaml` and save — changes are picked up automatically within a
+couple of seconds, no restart required.
 
-```sh
-docker compose restart
-# or for the one-line run above:
-docker restart rss-fulltext
-```
+### Live reload
 
-## Environment variables
+The running process watches `feeds.yaml` and reconciles itself whenever the file
+changes:
 
-All have defaults; override via `-e` on `docker run`, the `environment:` block
-in Compose, or the process environment for the bare binary.
+- **Add a feed** → a worker starts and its `/<name>.{xml,atom,json}` files appear
+  after the first refresh.
+- **Remove a feed** → its worker stops and its generated files are deleted.
+- **Change a feed's URL, interval, or title** → its worker restarts and refreshes.
+
+A few details worth knowing:
+
+- Changes are detected by polling the file's modification time (every 2s by
+  default; tune with `CONFIG_RELOAD_INTERVAL`, or set it to `0` to disable
+  watching). Polling is used rather than inotify because inotify events do not
+  fire reliably across Docker bind mounts.
+- Mount the **directory** (`./config`), not the single file. Docker binds a
+  single file by inode, so edits from editors that save by writing a temp file
+  and renaming it over the original would be invisible to the container. The
+  provided Compose file already mounts the directory.
+- If a save leaves the file temporarily invalid (a mid-edit truncation, or a
+  validation error such as an uppercase name), the reload is skipped, a warning
+  is logged, and the previously loaded feeds keep serving. The next valid save
+  is applied.
+
+## Advanced configuration
+
+Every knob below has a sensible default, so the shipped `docker-compose.yml`
+sets only `LISTEN_ADDR` and `CONFIG_PATH` — the rest fall back to these defaults.
+Override any of them via `-e` on `docker run`, the `environment:` block in
+Compose, or the process environment for the bare binary.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -126,6 +156,7 @@ in Compose, or the process environment for the bare binary.
 | `CACHE_DIR` | `/var/lib/rss-fulltext/cache` | per-article cache; sha256 keys |
 | `CACHE_TTL` | `24h` | how long a fetched article body stays cached; `0` disables caching |
 | `JANITOR_INTERVAL` | `1h` | how often expired cache files are purged; `0` disables the janitor |
+| `CONFIG_RELOAD_INTERVAL` | `2s` | how often `feeds.yaml` is polled for live reload; `0` disables watching |
 | `CONCURRENCY` | `4` | parallel article fetches per refresh |
 | `REQUEST_TIMEOUT` | `20s` | per-outbound-HTTP-request |
 | `READ_TIMEOUT` | `30s` | full request-read deadline on the HTTP server |
@@ -194,6 +225,35 @@ Docker network.
 > proxy), restrict `/metrics` at the proxy or only proxy `/<name>.{xml,atom,json}`
 > and `/feeds.json`.
 
+## Upgrading
+
+Upgrading is safe and in-place. The new version reads the same `CONFIG_PATH`,
+and your data volume (article cache + generated feeds) is untouched:
+
+```sh
+docker compose pull && docker compose up -d
+# one-line run: docker pull ghcr.io/mijndert/rss-fulltext:latest && recreate
+```
+
+An older **single-file** mount (`-v .../feeds.yaml:/etc/rss-fulltext/feeds.yaml:ro`)
+still boots and serves exactly as before, so you don't *have* to change anything.
+The only reason to switch is **reliable live reload**: Docker binds a single file
+by inode, so host-side edits made by editors that save-by-replace are invisible
+to the container. Mounting the containing **directory** fixes that:
+
+```diff
+- - ./feeds.yaml:/etc/rss-fulltext/feeds.yaml:ro
++ - ./config:/etc/rss-fulltext:ro
+```
+
+If you switch, put your file at `config/feeds.yaml` **before** recreating the
+container (`mkdir -p config && mv feeds.yaml config/`) — with the directory mount
+the app looks there, and a missing file will stop it from starting. `CONFIG_PATH`
+stays `/etc/rss-fulltext/feeds.yaml`.
+
+Running the bare binary? Nothing to change — live reload works against your
+existing `CONFIG_PATH` as-is.
+
 ## Persistence
 
 Compose creates a named volume `data` mounted at `/var/lib/rss-fulltext`. It
@@ -229,5 +289,5 @@ Or run the binary directly:
 
 ```sh
 go build -o rss-fulltext ./
-CONFIG_PATH=./feeds.yaml OUTPUT_DIR=./out CACHE_DIR=./cache ./rss-fulltext
+CONFIG_PATH=./config/feeds.yaml OUTPUT_DIR=./out CACHE_DIR=./cache ./rss-fulltext
 ```
