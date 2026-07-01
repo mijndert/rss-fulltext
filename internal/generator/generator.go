@@ -61,6 +61,12 @@ func (t *Tracker) Init(name string, s Status) {
 	t.mu.Unlock()
 }
 
+func (t *Tracker) Remove(name string) {
+	t.mu.Lock()
+	delete(t.m, name)
+	t.mu.Unlock()
+}
+
 func (t *Tracker) update(name string, mut func(*Status)) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
