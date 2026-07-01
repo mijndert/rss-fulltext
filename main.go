@@ -213,6 +213,7 @@ func runServer() {
 	mgr.Apply(ctx, feeds.Feeds)
 
 	if cfg.ReloadInterval > 0 {
+		logger.Info("watching config for changes", "path", cfg.ConfigPath, "interval", cfg.ReloadInterval)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -220,6 +221,8 @@ func runServer() {
 				mgr.Apply(ctx, f.Feeds)
 			}, logger)
 		}()
+	} else {
+		logger.Info("config live reload disabled (CONFIG_RELOAD_INTERVAL=0)")
 	}
 
 	if cfg.JanitorInterval > 0 {

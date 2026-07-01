@@ -227,17 +227,32 @@ Docker network.
 
 ## Upgrading
 
-If you're coming from a version that mounted the config file directly
-(`-v .../feeds.yaml:/etc/rss-fulltext/feeds.yaml:ro`), switch to mounting the
-containing **directory** so live reload works:
+Upgrading is safe and in-place. The new version reads the same `CONFIG_PATH`,
+and your data volume (article cache + generated feeds) is untouched:
+
+```sh
+docker compose pull && docker compose up -d
+# one-line run: docker pull ghcr.io/mijndert/rss-fulltext:latest && recreate
+```
+
+An older **single-file** mount (`-v .../feeds.yaml:/etc/rss-fulltext/feeds.yaml:ro`)
+still boots and serves exactly as before, so you don't *have* to change anything.
+The only reason to switch is **reliable live reload**: Docker binds a single file
+by inode, so host-side edits made by editors that save-by-replace are invisible
+to the container. Mounting the containing **directory** fixes that:
 
 ```diff
 - - ./feeds.yaml:/etc/rss-fulltext/feeds.yaml:ro
 + - ./config:/etc/rss-fulltext:ro
 ```
 
-Move your file to `config/feeds.yaml` and recreate the container
-(`docker compose up -d`). `CONFIG_PATH` stays `/etc/rss-fulltext/feeds.yaml`.
+If you switch, put your file at `config/feeds.yaml` **before** recreating the
+container (`mkdir -p config && mv feeds.yaml config/`) — with the directory mount
+the app looks there, and a missing file will stop it from starting. `CONFIG_PATH`
+stays `/etc/rss-fulltext/feeds.yaml`.
+
+Running the bare binary? Nothing to change — live reload works against your
+existing `CONFIG_PATH` as-is.
 
 ## Persistence
 
