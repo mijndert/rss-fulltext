@@ -69,6 +69,11 @@ func TestLoadRejections(t *testing.T) {
 		want string
 	}{
 		{
+			"no feeds",
+			"feeds: []\n",
+			"at least one feed is required",
+		},
+		{
 			"missing name",
 			"feeds:\n  - url: https://a.test/rss\n",
 			"name is required",
