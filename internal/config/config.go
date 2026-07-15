@@ -58,6 +58,16 @@ func (f *File) normalize() error {
 		return fmt.Errorf("default_interval %s is below minimum %s", f.DefaultInterval, MinInterval)
 	}
 
+	// An empty feed list is rejected: it is useless at startup, and it also
+	// guards the config watcher against the truncate-then-write window of an
+	// in-place edit, during which the file is momentarily empty. Treating that
+	// transient empty read as a valid zero-feed config would tear down every
+	// running generator until the next poll; failing validation makes the
+	// watcher skip it and keep the previous config instead.
+	if len(f.Feeds) == 0 {
+		return fmt.Errorf("at least one feed is required")
+	}
+
 	seen := make(map[string]bool, len(f.Feeds))
 	for i := range f.Feeds {
 		feed := &f.Feeds[i]

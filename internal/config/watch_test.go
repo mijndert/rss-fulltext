@@ -32,16 +32,29 @@ func TestWatchDetectsChange(t *testing.T) {
 	changes := make(chan *File, 4)
 	go Watch(ctx, path, 10*time.Millisecond, func(f *File) { changes <- f }, discardLogger())
 
-	// A change to the file should trigger exactly one reload with the new contents.
-	writeFile(t, path, "feeds:\n  - name: a\n    url: https://a.test/rss\n  - name: b\n    url: https://b.test/rss\n")
+	// A change to the file should trigger a reload with the new contents. The
+	// first write can lose the race with the watcher's initial os.Stat: if it
+	// lands before the baseline is captured it becomes the baseline and no change
+	// is ever seen. Re-apply the edit until the reload arrives; each rewrite
+	// advances the file's mtime, so a later poll is guaranteed to catch it.
+	updated := "feeds:\n  - name: a\n    url: https://a.test/rss\n  - name: b\n    url: https://b.test/rss\n"
+	writeFile(t, path, updated)
 
-	select {
-	case f := <-changes:
-		if len(f.Feeds) != 2 {
-			t.Fatalf("reloaded feeds = %d, want 2", len(f.Feeds))
+	deadline := time.After(2 * time.Second)
+	rewrite := time.NewTicker(50 * time.Millisecond)
+	defer rewrite.Stop()
+	for {
+		select {
+		case f := <-changes:
+			if len(f.Feeds) != 2 {
+				t.Fatalf("reloaded feeds = %d, want 2", len(f.Feeds))
+			}
+			return
+		case <-rewrite.C:
+			writeFile(t, path, updated)
+		case <-deadline:
+			t.Fatal("timed out waiting for reload")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for reload")
 	}
 }
 
